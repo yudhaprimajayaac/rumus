@@ -115,7 +115,12 @@
   }
   .card-head .sub { font-size: 13px; color: var(--text-muted); }
 
-  button {
+  .card-head .actions {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+  }
     font-family: var(--sans);
     cursor: pointer;
     border-radius: 7px;
@@ -331,7 +336,8 @@
     header.page p { font-size: 13.5px; }
     .card { padding: 14px 14px 16px; border-radius: 9px; }
     .card-head { flex-direction: column; gap: 8px; }
-    .card-head button { align-self: flex-start; }
+    .card-head .actions { width: 100%; justify-content: stretch; }
+    .card-head .actions button { flex: 1 1 auto; font-size: 11.5px; padding: 8px 6px; }
     table { min-width: 580px; }
     .add-row-bar { flex-direction: column; align-items: stretch; }
     .add-row-bar input,
@@ -362,7 +368,12 @@
             <h2>Daftar Kata Pencarian</h2>
             <div class="sub">Bid Saya & Target Klik/Hari bisa diedit langsung.</div>
           </div>
-          <button class="ghost" id="resetBtn" type="button">Reset contoh</button>
+          <div class="actions">
+            <button class="ghost" id="exportBtn" type="button">⬇ Export CSV</button>
+            <button class="ghost" id="importBtn" type="button">⬆ Import CSV</button>
+            <input type="file" id="importFile" accept=".csv,text/csv" style="display:none;">
+            <button class="ghost" id="resetBtn" type="button">Reset contoh</button>
+          </div>
         </div>
 
         <div class="table-scroll">
@@ -741,6 +752,144 @@ Jumlah Kata Kunci Optimal = Estimasi Total Klik ÷ Target Klik Minimum per Kata 
     kwInput.value = ''; qualityInput.value = ''; volInput.value = ''; bidInput.value = '';
     saveRows();
     renderAll();
+  });
+
+  function clamp(v, min, max) { return Math.min(max, Math.max(min, v)); }
+
+  // ---- CSV export ----
+  function csvField(v) {
+    v = (v === null || v === undefined) ? '' : String(v);
+    if (/[",\n\r]/.test(v)) v = '"' + v.replace(/"/g, '""') + '"';
+    return v;
+  }
+
+  function buildCSV() {
+    var lines = [];
+    lines.push(['Kata Pencarian', 'Kualitas', 'Volume Pencarian', 'Bid Rekomendasi', 'Bid Saya', 'Target Klik per Hari', 'Estimasi Biaya per Hari'].map(csvField).join(','));
+    var totalClicks = 0, totalBudget = 0, bidSum = 0;
+    rows.forEach(function (r) {
+      var cost = (r.bidMine || 0) * (r.targetClicks || 0);
+      totalClicks += (r.targetClicks || 0);
+      totalBudget += cost;
+      bidSum += (r.bidMine || 0);
+      lines.push([csvField(r.kw), r.quality, r.volume, r.bidRec, r.bidMine, r.targetClicks, cost].map(csvField).join(','));
+    });
+    var avgBid = rows.length ? bidSum / rows.length : 0;
+    lines.push('');
+    lines.push('Ringkasan,,,,,,');
+    lines.push('Jumlah Kata Kunci,' + rows.length);
+    lines.push('Rata-rata Bid,' + Math.round(avgBid));
+    lines.push('Total Target Klik per Hari,' + totalClicks);
+    lines.push('Total Budget Harian,' + Math.round(totalBudget));
+    return lines.join('\r\n');
+  }
+
+  async function getDownloads() {
+    if (!window.claude || typeof window.claude.use !== 'function') return null;
+    try { return await window.claude.use('downloads'); } catch (e) { return null; }
+  }
+
+  async function exportCSV() {
+    if (!rows.length) { alert('Belum ada kata kunci untuk diekspor.'); return; }
+    var csv = buildCSV();
+    var blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' });
+    var downloads = await getDownloads();
+    if (!downloads) {
+      alert('Fitur unduh tidak tersedia di tampilan ini.');
+      return;
+    }
+    var fname = 'kata-kunci-budget-' + new Date().toISOString().slice(0, 10) + '.csv';
+    try {
+      await downloads.save({ filename: fname, data: blob });
+    } catch (e) {
+      if (e && e.code === 'declined') return;
+      alert('Gagal mengunduh file: ' + (e && e.message ? e.message : 'unknown error'));
+    }
+  }
+
+  // ---- CSV import ----
+  function parseCSV(text) {
+    var out = [], row = [], field = '', inQuotes = false, i = 0;
+    while (i < text.length) {
+      var c = text[i];
+      if (inQuotes) {
+        if (c === '"') {
+          if (text[i + 1] === '"') { field += '"'; i += 2; continue; }
+          inQuotes = false; i++; continue;
+        }
+        field += c; i++; continue;
+      } else {
+        if (c === '"') { inQuotes = true; i++; continue; }
+        if (c === ',') { row.push(field); field = ''; i++; continue; }
+        if (c === '\r') { i++; continue; }
+        if (c === '\n') { row.push(field); out.push(row); row = []; field = ''; i++; continue; }
+        field += c; i++; continue;
+      }
+    }
+    if (field.length || row.length) { row.push(field); out.push(row); }
+    return out;
+  }
+
+  function findCol(header, needle) {
+    for (var i = 0; i < header.length; i++) {
+      if (header[i].indexOf(needle) !== -1) return i;
+    }
+    return -1;
+  }
+
+  function importCSV(text) {
+    var table = parseCSV(text).filter(function (r) { return r.length > 1 || (r.length === 1 && r[0].trim() !== ''); });
+    if (!table.length) { alert('File CSV kosong atau formatnya tidak dikenali.'); return; }
+
+    var header = table[0].map(function (h) { return (h || '').trim().toLowerCase(); });
+    var idxKw = findCol(header, 'kata pencarian');
+    var idxQuality = findCol(header, 'kualitas');
+    var idxVolume = findCol(header, 'volume');
+    var idxBidRec = findCol(header, 'bid rekomendasi');
+    var idxBidMine = findCol(header, 'bid saya');
+    var idxClicks = findCol(header, 'klik');
+
+    if (idxKw === -1) { alert('Kolom "Kata Pencarian" tidak ditemukan di file ini. Pastikan header sesuai format export.'); return; }
+
+    var newRows = [];
+    for (var r = 1; r < table.length; r++) {
+      var rowArr = table[r];
+      if (!rowArr || !rowArr.length) continue;
+      var kwVal = (rowArr[idxKw] || '').trim();
+      if (!kwVal || kwVal.toLowerCase() === 'ringkasan') break;
+      var bidRec = parseFloat(rowArr[idxBidRec]) || 0;
+      var bidMine = idxBidMine !== -1 ? (parseFloat(rowArr[idxBidMine]) || bidRec) : bidRec;
+      newRows.push({
+        kw: kwVal,
+        quality: clamp(parseInt(rowArr[idxQuality], 10) || 5, 1, 10),
+        volume: parseFloat(rowArr[idxVolume]) || 0,
+        bidRec: bidRec,
+        bidMine: bidMine,
+        targetClicks: idxClicks !== -1 ? (parseFloat(rowArr[idxClicks]) || 15) : 15
+      });
+    }
+
+    if (!newRows.length) { alert('Tidak ada baris kata kunci yang terbaca dari file ini.'); return; }
+    rows = newRows;
+    saveRows();
+    renderAll();
+    alert('Berhasil mengimpor ' + newRows.length + ' kata kunci dari CSV.');
+  }
+
+  document.getElementById('exportBtn').addEventListener('click', exportCSV);
+
+  document.getElementById('importBtn').addEventListener('click', function () {
+    document.getElementById('importFile').click();
+  });
+
+  document.getElementById('importFile').addEventListener('change', function (e) {
+    var file = e.target.files && e.target.files[0];
+    if (!file) return;
+    var reader = new FileReader();
+    reader.onload = function () { importCSV(String(reader.result)); };
+    reader.onerror = function () { alert('Gagal membaca file.'); };
+    reader.readAsText(file, 'UTF-8');
+    e.target.value = '';
   });
 
   loadRows();
