@@ -789,20 +789,39 @@ Jumlah Kata Kunci Optimal = Estimasi Total Klik ÷ Target Klik Minimum per Kata 
     try { return await window.claude.use('downloads'); } catch (e) { return null; }
   }
 
+  function downloadBlobFallback(filename, blob) {
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(function () { URL.revokeObjectURL(url); }, 2000);
+  }
+
   async function exportCSV() {
     if (!rows.length) { alert('Belum ada kata kunci untuk diekspor.'); return; }
     var csv = buildCSV();
     var blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' });
-    var downloads = await getDownloads();
-    if (!downloads) {
-      alert('Fitur unduh tidak tersedia di tampilan ini.');
-      return;
-    }
     var fname = 'kata-kunci-budget-' + new Date().toISOString().slice(0, 10) + '.csv';
+
+    // Coba lewat kemampuan unduh bawaan Claude dulu (kalau dibuka sebagai artifact di claude.ai).
+    var downloads = await getDownloads();
+    if (downloads) {
+      try {
+        await downloads.save({ filename: fname, data: blob });
+        return;
+      } catch (e) {
+        if (e && e.code === 'declined') return;
+        // lanjut ke fallback biasa di bawah kalau gagal karena sebab lain
+      }
+    }
+
+    // Fallback standar: berfungsi di browser mana pun, termasuk saat sudah di-deploy (Vercel, dll).
     try {
-      await downloads.save({ filename: fname, data: blob });
+      downloadBlobFallback(fname, blob);
     } catch (e) {
-      if (e && e.code === 'declined') return;
       alert('Gagal mengunduh file: ' + (e && e.message ? e.message : 'unknown error'));
     }
   }
